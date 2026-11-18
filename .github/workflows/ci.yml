@@ -30,14 +30,31 @@ jobs:
       - name: Test HTTP endpoints
         shell: bash
         run: |
-          docker run --rm -d --name workload-api \
-            -p 127.0.0.1:8080:8080 "$IMAGE"
-          trap 'docker stop workload-api' EXIT
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "Container state:"
+              docker inspect --format '{{json .State}}' workload-api || true
+              echo "Container logs:"
+              docker logs workload-api || true
+            fi
+            docker rm -f workload-api >/dev/null 2>&1 || true
+            exit "$status"
+          }
 
-          curl -fsS --retry 10 --retry-connrefused --retry-delay 1 \
+          trap cleanup EXIT
+
+          docker run -d --name workload-api \
+            -p 127.0.0.1:8080:8080 "$IMAGE"
+
+          echo "Waiting for /healthz..."
+          curl -fsS --retry 30 --retry-all-errors --retry-delay 1 \
+            --retry-max-time 30 --max-time 3 \
             http://127.0.0.1:8080/healthz
 
-          curl -fsS http://127.0.0.1:8080/ | python3 -c \
+          echo
+          echo "Checking /..."
+          curl -fsS --max-time 3 http://127.0.0.1:8080/ | python3 -c \
             'import json, sys; body = json.load(sys.stdin); assert body["app"] == "workload-api" and body["version"]'
 
       - name: Scan image with Trivy
