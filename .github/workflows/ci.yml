@@ -1,0 +1,60 @@
+name: Build and publish workload API
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          docker build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "$image" .
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Test HTTP endpoints
+        shell: bash
+        run: |
+          docker run --rm -d --name workload-api \
+            -p 127.0.0.1:8080:8080 "$IMAGE"
+          trap 'docker stop workload-api' EXIT
+
+          curl -fsS --retry 10 --retry-connrefused --retry-delay 1 \
+            http://127.0.0.1:8080/healthz
+
+          curl -fsS http://127.0.0.1:8080/ | python3 -c \
+            'import json, sys; body = json.load(sys.stdin); assert body["app"] == "workload-api" and body["version"]'
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}
+          scanners: vuln
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Publish image to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          printf 'Published image: `%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
