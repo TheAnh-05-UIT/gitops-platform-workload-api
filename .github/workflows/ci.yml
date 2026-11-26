@@ -3,25 +3,48 @@ name: Build and publish workload API
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  TRIVY_VERSION: v0.76.2
 
 jobs:
-  build-and-publish:
+  validate-pr:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install test-only YAML parser
+        run: python3 -m pip install 'PyYAML==6.0.3'
+      - run: python3 -B -m unittest discover -s tests -v
+
+  build:
+    name: Build and smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      archive_sha: ${{ steps.archive.outputs.archive_sha }}
+      image_id: ${{ steps.archive.outputs.image_id }}
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
       - name: Build image
         shell: bash
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          image="workload-api-candidate:${GITHUB_SHA}"
           docker build \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             -t "$image" .
@@ -57,21 +80,141 @@ jobs:
           curl -fsS --max-time 3 http://127.0.0.1:8080/ | python3 -c \
             'import json, sys; body = json.load(sys.stdin); assert body["app"] == "workload-api" and body["version"]'
 
+      - name: Save tested image
+        id: archive
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/workload-image.tar"
+          docker save --output "$archive" "$IMAGE"
+          digest=$(sha256sum "$archive")
+          image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+          printf 'archive_sha=%s\nimage_id=%s\n' "${digest%% *}" "$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Upload tested image
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workload-image-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workload-image.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  scan:
+    name: Scan image
+    needs: build
+    if: needs.build.outputs.artifact_id != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      trivy_outcome: ${{ steps.trivy.outcome }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/tested-image
+      - name: Verify image archive
+        shell: bash
+        env:
+          EXPECTED_ARCHIVE_SHA: ${{ needs.build.outputs.archive_sha }}
+        run: |
+          [[ "$EXPECTED_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA" "$RUNNER_TEMP/tested-image/workload-image.tar" |
+            sha256sum --check --strict
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+        id: trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ env.IMAGE }}
+          input: ${{ runner.temp }}/tested-image/workload-image.tar
+          version: ${{ env.TRIVY_VERSION }}
           scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: "false"
+          cache: "false"
           severity: CRITICAL
           exit-code: "1"
 
+  publish:
+    name: Publish image
+    needs: [build, scan]
+    # GHCR publication requires a separate, explicitly approved activation change.
+    if: >-
+      false &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected &&
+      github.repository == 'TheAnh-05-UIT/gitops-platform-workload-api' &&
+      needs.build.result == 'success' &&
+      needs.scan.result == 'success' &&
+      needs.scan.outputs.trivy_outcome == 'success'
+    runs-on: ubuntu-latest
+    environment: workload-publication
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: workload-publication-${{ github.sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out reviewed receipt helper
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/publication_receipt.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/tested-image
+      - name: Verify image archive
+        shell: bash
+        env:
+          EXPECTED_ARCHIVE_SHA: ${{ needs.build.outputs.archive_sha }}
+        run: |
+          [[ "$EXPECTED_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA" "$RUNNER_TEMP/tested-image/workload-image.tar" |
+            sha256sum --check --strict
+      - name: Load the scanned image
+        shell: bash
+        env:
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
+        run: |
+          [[ "$EXPECTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker load --input "$RUNNER_TEMP/tested-image/workload-image.tar" >/dev/null
+          actual=$(docker image inspect --format '{{.Id}}' "workload-api-candidate:$GITHUB_SHA")
+          [[ "$actual" == "$EXPECTED_IMAGE_ID" ]]
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          docker tag "$EXPECTED_IMAGE_ID" "$image"
+          printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Publish image to GHCR
         shell: bash
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_PUBLISH_TOKEN }}
+          GHCR_PUBLISHER: ${{ vars.GHCR_PUBLISHER }}
+          EXPECTED_ARCHIVE_SHA: ${{ needs.build.outputs.archive_sha }}
+          EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
         run: |
+          [[ -n "$GHCR_TOKEN" && -n "$GHCR_PUBLISHER" ]]
+          python3 -B scripts/publication_receipt.py check-absent
           printf '%s' "$GHCR_TOKEN" |
-            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          docker push "$IMAGE"
+            docker login ghcr.io --username "$GHCR_PUBLISHER" --password-stdin
+          env -u GHCR_TOKEN docker push "$IMAGE" | tee "$RUNNER_TEMP/push.log"
+          python3 -B scripts/publication_receipt.py record \
+            --push-log "$RUNNER_TEMP/push.log" \
+            --archive-sha "$EXPECTED_ARCHIVE_SHA" --image-id "$EXPECTED_IMAGE_ID" \
+            --scanner-version "$TRIVY_VERSION" \
+            --output "$RUNNER_TEMP/publication-receipt.json"
           printf 'Published image: `%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-receipt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication-receipt.json
+          if-no-files-found: error
+          retention-days: 30
