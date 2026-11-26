@@ -32,6 +32,13 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn("docker login", str(job))
         self.assertFalse(any("docker build" in step.get("run", "") for step in publish["steps"]))
 
+    def test_preview_stays_disabled_and_read_only_during_hosted_review(self):
+        preview = yaml.load(Path(".github/workflows/promotion-preview.yml").read_bytes(),
+                            Loader=yaml.BaseLoader)
+        self.assertEqual(set(preview["on"]), {"workflow_dispatch"})
+        self.assertEqual(set(preview["permissions"].values()), {"read"})
+        self.assertTrue(preview["jobs"]["preview"]["if"].startswith("false &&"))
+
     def test_failed_or_skipped_scan_cannot_reach_publish(self):
         scan = self.jobs["scan"]
         publish = self.jobs["publish"]

@@ -15,7 +15,8 @@ permissions:
 
 jobs:
   preview:
-    if: github.ref == 'refs/heads/main' && vars.PROMOTION_PREVIEW_ENABLED == 'true'
+    # Keep hosted preview disabled until a separate reviewed activation change.
+    if: false && github.ref == 'refs/heads/main' && vars.PROMOTION_PREVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: promotion-preview
     env:
