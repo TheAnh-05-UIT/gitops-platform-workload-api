@@ -17,6 +17,13 @@ ENV = {
 
 
 class PublicationReceiptTests(unittest.TestCase):
+    def test_missing_publisher_credentials_fail_before_registry_access(self):
+        opener = Mock()
+        for actor, credential in (("", "synthetic"), ("publisher", "")):
+            with self.subTest(actor=actor), self.assertRaisesRegex(PublicationError, "Missing GHCR"):
+                Registry(actor, credential, opener=opener)
+        opener.assert_not_called()
+
     def test_verified_receipt_has_immutable_workflow_identity(self):
         output = f"{SHA}: digest: {DIGEST} size: 123\n"
         self.assertEqual(push_digest(output, SHA), DIGEST)

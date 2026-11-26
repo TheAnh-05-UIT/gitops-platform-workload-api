@@ -101,7 +101,7 @@ class Registry:
         except OSError:
             raise PublicationError("GHCR request failed or timed out") from None
 
-    def manifest(self, reference):
+    def manifest(self, reference, *, image_id=None):
         result = self.read(f"/v2/{REPOSITORY}/manifests/{reference}", self.authorization, missing=True)
         if result is None:
             return None
@@ -110,6 +110,10 @@ class Registry:
         media_type = headers.get("Content-Type", "").split(";", 1)[0]
         if headers.get("Docker-Content-Digest") != digest or media_type not in MEDIA_TYPES:
             raise PublicationError("Registry manifest digest or media type is invalid")
+        if image_id is not None:
+            manifest = json.loads(body)
+            if manifest.get("mediaType") != media_type or manifest.get("config", {}).get("digest") != image_id:
+                raise PublicationError("Published image does not match the scanned image ID")
         return digest, media_type
 
 
@@ -120,21 +124,31 @@ def main():
     record = subparsers.add_parser("record")
     record.add_argument("--push-log", required=True, type=Path)
     record.add_argument("--output", required=True, type=Path)
+    record.add_argument("--archive-sha", required=True)
+    record.add_argument("--image-id", required=True)
+    record.add_argument("--scanner-version", required=True)
     args = parser.parse_args()
     try:
         sha = source(os.environ)
-        registry = Registry(os.environ.get("GITHUB_ACTOR"), os.environ.get("GHCR_TOKEN"))
-        manifest = registry.manifest(sha)
+        registry = Registry(os.environ.get("GHCR_PUBLISHER"), os.environ.get("GHCR_TOKEN"))
         if args.action == "check-absent":
-            if manifest is not None:
+            if registry.manifest(sha) is not None:
                 raise PublicationError("Source tag already exists; retain its original publication receipt")
             print("Source tag is absent")
             return 0
+        if not (re.fullmatch(r"[0-9a-f]{64}", args.archive_sha)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_id)
+                and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.scanner_version)):
+            raise PublicationError("Invalid scanned image handoff identity")
         pushed = push_digest(args.push_log.read_text(encoding="utf-8"), sha)
-        if manifest is None or registry.manifest(pushed) != manifest:
+        manifest = registry.manifest(sha, image_id=args.image_id)
+        if manifest is None or registry.manifest(pushed, image_id=args.image_id) != manifest:
             raise PublicationError("Published manifest is unavailable by tag or digest")
         observed, media_type = manifest
-        receipt = make_receipt(os.environ, pushed, observed) | {"media_type": media_type}
+        receipt = make_receipt(os.environ, pushed, observed) | {
+            "media_type": media_type, "archive_sha256": args.archive_sha,
+            "image_id": args.image_id, "scanner_version": args.scanner_version,
+        }
         args.output.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     except PublicationError as error:
         parser.exit(1, f"Publication receipt blocked: {error}\n")

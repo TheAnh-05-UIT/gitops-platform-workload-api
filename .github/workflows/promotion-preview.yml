@@ -17,13 +17,14 @@ jobs:
   preview:
     if: github.ref == 'refs/heads/main' && vars.PROMOTION_PREVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
+    environment: promotion-preview
     env:
       CONFIG_TOOL_SHA: ${{ vars.PROMOTION_CONFIG_TOOL_SHA }}
     steps:
       - name: Validate pinned config tool revision
         shell: bash
         run: '[[ "$CONFIG_TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]'
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: TheAnh-05-UIT/gitops-platform-config
           ref: ${{ env.CONFIG_TOOL_SHA }}
