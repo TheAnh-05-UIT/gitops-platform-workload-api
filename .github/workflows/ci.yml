@@ -3,14 +3,31 @@ name: Build and publish workload API
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build-and-publish:
+  validate-pr:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -s tests -v
+
+  build-and-publish:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: workload-publication-${{ github.sha }}
+      cancel-in-progress: false
 
     steps:
       - name: Check out source
@@ -71,7 +88,19 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          python3 -B scripts/publication_receipt.py check-absent
           printf '%s' "$GHCR_TOKEN" |
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          docker push "$IMAGE"
+          docker push "$IMAGE" | tee "$RUNNER_TEMP/push.log"
+          python3 -B scripts/publication_receipt.py record \
+            --push-log "$RUNNER_TEMP/push.log" \
+            --output "$RUNNER_TEMP/publication-receipt.json"
           printf 'Published image: `%s`\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-receipt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication-receipt.json
+          if-no-files-found: error
+          retention-days: 30

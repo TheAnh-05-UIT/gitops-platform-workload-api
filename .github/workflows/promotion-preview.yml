@@ -1,0 +1,45 @@
+name: Preview image promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: Reviewed config request ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+jobs:
+  preview:
+    if: github.ref == 'refs/heads/main' && vars.PROMOTION_PREVIEW_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CONFIG_TOOL_SHA: ${{ vars.PROMOTION_CONFIG_TOOL_SHA }}
+    steps:
+      - name: Validate pinned config tool revision
+        shell: bash
+        run: '[[ "$CONFIG_TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v6
+        with:
+          repository: TheAnh-05-UIT/gitops-platform-config
+          ref: ${{ env.CONFIG_TOOL_SHA }}
+          token: ${{ secrets.PROMOTION_CONFIG_READ_TOKEN }}
+          persist-credentials: false
+      - name: Install existing config YAML parser
+        run: python3 -m pip install 'PyYAML==6.0.3'
+      - name: Preview with read-only credentials
+        env:
+          PROMOTION_SOURCE_READ_TOKEN: ${{ github.token }}
+          PROMOTION_CONFIG_READ_TOKEN: ${{ secrets.PROMOTION_CONFIG_READ_TOKEN }}
+          PROMOTION_BOT_LOGIN: ${{ vars.PROMOTION_BOT_LOGIN }}
+          REQUEST_ID: ${{ inputs.request }}
+        shell: bash
+        run: |
+          printf '%s' "$PROMOTION_SOURCE_READ_TOKEN" |
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          python3 -B -m scripts.promote_image --mode read-only \
+            --request "$REQUEST_ID" --bot-login "$PROMOTION_BOT_LOGIN"
