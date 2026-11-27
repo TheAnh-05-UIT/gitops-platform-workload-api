@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,27 @@ def source(environ):
     ):
         raise PublicationError("Receipt is restricted to the trusted main publication workflow")
     return sha
+
+
+def archive_config_digest(archive, image):
+    """Identify the single Linux image config without using a local image-store ID."""
+    def read_member(saved, name):
+        members = [member for member in saved.getmembers() if member.name == name]
+        if len(members) != 1 or not members[0].isfile() or members[0].size > 4 * 1024 * 1024:
+            raise PublicationError("Invalid Docker image archive metadata")
+        with saved.extractfile(members[0]) as stream:
+            return stream.read()
+
+    with tarfile.open(archive, "r:") as saved:
+        manifest = json.loads(read_member(saved, "manifest.json"))
+        if (not isinstance(manifest, list) or len(manifest) != 1
+                or manifest[0].get("RepoTags") != [image]):
+            raise PublicationError("Expected one saved image with the tested source tag")
+        raw = read_member(saved, manifest[0]["Config"])
+        config = json.loads(raw)
+        if config.get("os") != "linux" or config.get("architecture") != "amd64":
+            raise PublicationError("Expected a Linux amd64 image config")
+        return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def push_digest(output, sha):
@@ -121,6 +143,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("check-absent")
+    archive = subparsers.add_parser("archive-config-digest")
+    archive.add_argument("--archive", required=True, type=Path)
+    archive.add_argument("--image", required=True)
     record = subparsers.add_parser("record")
     record.add_argument("--push-log", required=True, type=Path)
     record.add_argument("--output", required=True, type=Path)
@@ -129,6 +154,9 @@ def main():
     record.add_argument("--scanner-version", required=True)
     args = parser.parse_args()
     try:
+        if args.action == "archive-config-digest":
+            print(archive_config_digest(args.archive, args.image))
+            return 0
         sha = source(os.environ)
         registry = Registry(os.environ.get("GHCR_PUBLISHER"), os.environ.get("GHCR_TOKEN"))
         if args.action == "check-absent":
@@ -152,7 +180,7 @@ def main():
         args.output.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     except PublicationError as error:
         parser.exit(1, f"Publication receipt blocked: {error}\n")
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
         parser.exit(1, "Publication receipt blocked: invalid or inaccessible evidence\n")
     print("Verified and recorded the GHCR publication receipt")
     return 0
