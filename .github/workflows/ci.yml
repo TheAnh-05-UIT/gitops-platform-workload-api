@@ -161,10 +161,11 @@ jobs:
   publish:
     name: Publish image
     needs: [build, scan]
-    # GHCR publication requires a separate, explicitly approved activation change.
+    # Only the activation merge from this protected base can request publication.
     if: >-
-      false &&
       github.event_name == 'push' &&
+      github.event.before == '7a19e620993324ae54930205fbf9f1cd1f2fb004' &&
+      github.run_attempt == '1' &&
       github.ref == 'refs/heads/main' &&
       github.ref_protected &&
       github.repository == 'TheAnh-05-UIT/gitops-platform-workload-api' &&
