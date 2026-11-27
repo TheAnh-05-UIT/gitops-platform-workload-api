@@ -1,5 +1,5 @@
 **
 !Dockerfile
-!requirements-linux.lock
+!requirements.txt
 !workload_api/
 !workload_api/app.py
