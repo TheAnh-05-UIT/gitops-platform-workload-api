@@ -48,7 +48,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(scan["permissions"], {"contents": "read"})
         self.assertEqual(set(publish["needs"]), {"build", "scan"})
         self.assertEqual(set(re.split(r"\s*&&\s*", publish["if"])), {
-            "github.event.before == '7a19e620993324ae54930205fbf9f1cd1f2fb004'",
+            "github.event.before == '5ebc4882e4c680dfd7166f073bc34c38c2332c41'",
             "github.run_attempt == '1'",
             "github.event_name == 'push'",
             "github.ref == 'refs/heads/main'",

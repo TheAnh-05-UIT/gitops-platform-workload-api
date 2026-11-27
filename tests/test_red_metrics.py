@@ -24,7 +24,9 @@ class RedMetricsTest(unittest.TestCase):
 
         client = app.test_client()
         self.assertEqual(client.get("/").json, {"app": "workload-api", "version": "v2"})
-        self.assertEqual(client.get("/healthz").json, {"status": "ok"})
+        health = client.get("/healthz")
+        self.assertEqual(health.json, {"status": "ok"})
+        self.assertEqual(health.headers["Cache-Control"], "no-store")
         self.assertEqual(client.get("/unknown/customer-id?token=redacted").status_code, 404)
         response = client.get("/metrics")
         self.assertEqual(response.status_code, 200)
