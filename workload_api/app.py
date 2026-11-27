@@ -35,7 +35,7 @@ def index():
 
 @app.get("/healthz")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok"}, 200, {"Cache-Control": "no-store"}
 
 
 @app.get("/metrics")

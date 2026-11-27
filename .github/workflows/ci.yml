@@ -164,7 +164,7 @@ jobs:
     # Only the activation merge from this protected base can request publication.
     if: >-
       github.event_name == 'push' &&
-      github.event.before == '7a19e620993324ae54930205fbf9f1cd1f2fb004' &&
+      github.event.before == '5ebc4882e4c680dfd7166f073bc34c38c2332c41' &&
       github.run_attempt == '1' &&
       github.ref == 'refs/heads/main' &&
       github.ref_protected &&
