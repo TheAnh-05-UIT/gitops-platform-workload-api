@@ -1,4 +1,3 @@
-import importlib.util
 import unittest
 
 from workload_api.metrics import RedMetrics
@@ -20,7 +19,6 @@ class RedMetricsTest(unittest.TestCase):
         self.assertIn('workload_api_http_request_duration_seconds_count{route="index"} 2\n', data)
         self.assertIn('workload_api_http_request_duration_seconds_sum{route="index"} 0.76\n', data)
 
-    @unittest.skipUnless(importlib.util.find_spec("flask"), "Flask runtime dependency unavailable")
     def test_flask_smoke_preserves_contract_and_excludes_collection_from_red(self):
         from workload_api.app import app
 
@@ -37,7 +35,6 @@ class RedMetricsTest(unittest.TestCase):
         self.assertIn('route="index",status_class="2xx"', data)
         self.assertIn('route="unmatched",status_class="4xx"', data)
 
-    @unittest.skipUnless(importlib.util.find_spec("flask"), "Flask runtime dependency unavailable")
     def test_request_log_uses_only_bounded_fields(self):
         from workload_api.app import app
 

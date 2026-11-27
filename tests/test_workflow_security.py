@@ -74,3 +74,9 @@ class WorkflowSecurityTests(unittest.TestCase):
             verify = next(s for s in job["steps"] if s.get("name") == "Verify image archive")
             self.assertEqual(verify["env"]["EXPECTED_ARCHIVE_SHA"], "${{ needs.build.outputs.archive_sha }}")
             self.assertIn("sha256sum --check --strict", verify["run"])
+
+    def test_pr_job_installs_app_dependencies_before_running_tests(self):
+        commands = [step["run"] for step in self.jobs["validate-pr"]["steps"] if "run" in step]
+        suite = next(i for i, command in enumerate(commands) if "-m unittest discover" in command)
+        self.assertTrue(any("-m pip install" in command and "-r requirements.txt" in command
+                            for command in commands[:suite]))
