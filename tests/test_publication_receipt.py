@@ -1,9 +1,16 @@
 import hashlib
+import io
+import json
+import tarfile
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
-from scripts.publication_receipt import MEDIA_TYPES, PublicationError, Registry, make_receipt, push_digest
+from scripts.publication_receipt import (
+    MEDIA_TYPES, PublicationError, Registry, archive_config_digest, make_receipt, push_digest,
+)
 
 
 SHA = "a" * 40
@@ -17,6 +24,28 @@ ENV = {
 
 
 class PublicationReceiptTests(unittest.TestCase):
+    def test_saved_config_identity_is_separate_from_the_local_image_index(self):
+        tag = "workload-api-candidate:" + SHA
+        for arch, tags, matches in (("amd64", [tag], True), ("arm64", [tag], False),
+                                    ("amd64", ["unrelated:latest"], False)):
+            with self.subTest(arch=arch, tags=tags), tempfile.TemporaryDirectory() as directory:
+                archive = Path(directory) / "workload-image.tar"
+                config = json.dumps({"os": "linux", "architecture": arch}).encode()
+                with tarfile.open(archive, "w") as saved:
+                    for name, data in (
+                        ("manifest.json", json.dumps([{"Config": "config.json", "RepoTags": tags}]).encode()),
+                        ("config.json", config),
+                    ):
+                        entry = tarfile.TarInfo(name)
+                        entry.size = len(data)
+                        saved.addfile(entry, io.BytesIO(data))
+                if matches:
+                    self.assertEqual(archive_config_digest(archive, tag),
+                                     "sha256:" + hashlib.sha256(config).hexdigest())
+                else:
+                    with self.assertRaises(PublicationError):
+                        archive_config_digest(archive, tag)
+
     def test_missing_publisher_credentials_fail_before_registry_access(self):
         opener = Mock()
         for actor, credential in (("", "synthetic"), ("publisher", "")):
