@@ -29,7 +29,7 @@ jobs:
 
   build:
     name: Build and smoke
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           image="workload-api-candidate:${GITHUB_SHA}"
-          docker build \
+          docker build --platform linux/amd64 --provenance=false \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             -t "$image" .
           echo "IMAGE=$image" >> "$GITHUB_ENV"
@@ -90,7 +90,7 @@ jobs:
           archive="$RUNNER_TEMP/workload-image.tar"
           docker save --output "$archive" "$IMAGE"
           digest=$(sha256sum "$archive")
-          image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+          image_id=$(python3 -B scripts/publication_receipt.py archive-config-digest --archive "$archive" --image "$IMAGE")
           printf 'archive_sha=%s\nimage_id=%s\n' "${digest%% *}" "$image_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload tested image
@@ -137,8 +137,26 @@ jobs:
           vuln-type: os,library
           ignore-unfixed: "false"
           cache: "false"
-          severity: CRITICAL
+          severity: HIGH,CRITICAL
           exit-code: "1"
+      - name: Scan image secrets
+        shell: bash
+        run: |
+          trivy image --input "$RUNNER_TEMP/tested-image/workload-image.tar" \
+            --scanners secret --exit-code 1 --format json \
+            --output "$RUNNER_TEMP/image-secret-scan.json"
+      - name: Generate SBOM from tested image
+        shell: bash
+        run: |
+          trivy image --input "$RUNNER_TEMP/tested-image/workload-image.tar" \
+            --format cyclonedx --output "$RUNNER_TEMP/workload-sbom.cdx.json"
+      - name: Upload image SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workload-sbom-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workload-sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 30
 
   publish:
     name: Publish image
@@ -157,7 +175,6 @@ jobs:
     environment: workload-publication
     permissions:
       contents: read
-      packages: write
     concurrency:
       group: workload-publication-${{ github.sha }}
       cancel-in-progress: false
@@ -188,11 +205,13 @@ jobs:
           EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
         run: |
           [[ "$EXPECTED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker load --input "$RUNNER_TEMP/tested-image/workload-image.tar" >/dev/null
-          actual=$(docker image inspect --format '{{.Id}}' "workload-api-candidate:$GITHUB_SHA")
+          archive="$RUNNER_TEMP/tested-image/workload-image.tar"
+          source_image="workload-api-candidate:$GITHUB_SHA"
+          actual=$(python3 -B scripts/publication_receipt.py archive-config-digest --archive "$archive" --image "$source_image")
           [[ "$actual" == "$EXPECTED_IMAGE_ID" ]]
+          docker load --input "$archive" >/dev/null
           image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
-          docker tag "$EXPECTED_IMAGE_ID" "$image"
+          docker tag "$source_image" "$image"
           printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       - name: Publish image to GHCR
         shell: bash
@@ -206,7 +225,7 @@ jobs:
           python3 -B scripts/publication_receipt.py check-absent
           printf '%s' "$GHCR_TOKEN" |
             docker login ghcr.io --username "$GHCR_PUBLISHER" --password-stdin
-          env -u GHCR_TOKEN docker push "$IMAGE" | tee "$RUNNER_TEMP/push.log"
+          env -u GHCR_TOKEN docker push --platform linux/amd64 "$IMAGE" | tee "$RUNNER_TEMP/push.log"
           python3 -B scripts/publication_receipt.py record \
             --push-log "$RUNNER_TEMP/push.log" \
             --archive-sha "$EXPECTED_ARCHIVE_SHA" --image-id "$EXPECTED_IMAGE_ID" \

@@ -10,10 +10,10 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.workflow = yaml.load(Path(".github/workflows/ci.yml").read_bytes(), Loader=yaml.BaseLoader)
         self.jobs = self.workflow["jobs"]
 
-    def test_only_publisher_can_write_packages_and_only_on_protected_path(self):
+    def test_publication_uses_only_the_dedicated_credential_on_the_protected_path(self):
         writers = [name for name, job in self.jobs.items()
                    if job.get("permissions", {}).get("packages") == "write"]
-        self.assertEqual(writers, ["publish"])
+        self.assertEqual(writers, [])
         self.assertNotIn("packages", self.workflow["permissions"])
         publish = self.jobs["publish"]
         self.assertIn("github.event_name == 'push'", publish["if"])
@@ -42,7 +42,10 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_failed_or_skipped_scan_cannot_reach_publish(self):
         scan = self.jobs["scan"]
         publish = self.jobs["publish"]
+        self.assertIn("github.event_name == 'pull_request'", self.jobs["build"]["if"])
+        self.assertEqual(self.jobs["build"]["permissions"], {"contents": "read"})
         self.assertEqual(scan["needs"], "build")
+        self.assertEqual(scan["permissions"], {"contents": "read"})
         self.assertEqual(set(publish["needs"]), {"build", "scan"})
         self.assertEqual(set(re.split(r"\s*&&\s*", publish["if"])), {
             "false",
@@ -63,8 +66,24 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(step["with"]["version"], "${{ env.TRIVY_VERSION }}")
         self.assertEqual(self.workflow["env"]["TRIVY_VERSION"], "v0.76.2")
         self.assertEqual(step["with"]["exit-code"], "1")
-        self.assertEqual(step["with"]["severity"], "CRITICAL")
+        self.assertEqual(step["with"]["severity"], "HIGH,CRITICAL")
         self.assertEqual(step["with"]["scanners"], "vuln")
+
+    def test_secret_scan_and_sbom_use_the_verified_archive(self):
+        scan = self.jobs["scan"]
+        steps = {step.get("name"): step for step in scan["steps"]}
+        archive = '"$RUNNER_TEMP/tested-image/workload-image.tar"'
+        self.assertIn(archive, steps["Scan image secrets"]["run"])
+        self.assertIn("--scanners secret --exit-code 1", steps["Scan image secrets"]["run"])
+        self.assertNotIn("--severity", steps["Scan image secrets"]["run"])
+        self.assertIn(archive, steps["Generate SBOM from tested image"]["run"])
+        self.assertIn("--format cyclonedx", steps["Generate SBOM from tested image"]["run"])
+        upload = steps["Upload image SBOM"]["with"]
+        self.assertEqual(upload["path"], "${{ runner.temp }}/workload-sbom.cdx.json")
+        self.assertEqual(upload["if-no-files-found"], "error")
+        for name in ("Scan image secrets", "Generate SBOM from tested image", "Upload image SBOM"):
+            self.assertNotIn("if", steps[name])
+            self.assertNotIn("continue-on-error", steps[name])
 
     def test_scan_and_publish_consume_the_same_artifact_and_check_its_hash(self):
         for name in ("scan", "publish"):
@@ -74,6 +93,15 @@ class WorkflowSecurityTests(unittest.TestCase):
             verify = next(s for s in job["steps"] if s.get("name") == "Verify image archive")
             self.assertEqual(verify["env"]["EXPECTED_ARCHIVE_SHA"], "${{ needs.build.outputs.archive_sha }}")
             self.assertIn("sha256sum --check --strict", verify["run"])
+
+    def test_publication_binds_the_scanned_linux_image_config(self):
+        build = {step.get("name"): step for step in self.jobs["build"]["steps"]}
+        publish = {step.get("name"): step for step in self.jobs["publish"]["steps"]}
+        self.assertIn("--platform linux/amd64 --provenance=false", build["Build image"]["run"])
+        self.assertIn("archive-config-digest", build["Save tested image"]["run"])
+        self.assertIn("archive-config-digest", publish["Load the scanned image"]["run"])
+        self.assertIn('[[ "$actual" == "$EXPECTED_IMAGE_ID" ]]', publish["Load the scanned image"]["run"])
+        self.assertIn("docker push --platform linux/amd64", publish["Publish image to GHCR"]["run"])
 
     def test_pr_job_installs_app_dependencies_before_running_tests(self):
         commands = [step["run"] for step in self.jobs["validate-pr"]["steps"] if "run" in step]
